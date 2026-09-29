@@ -1,0 +1,80 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Naman Jain <namjain@linux.microsoft.com>
+Date: Mon, 10 Aug 2026 09:07:14 +0000
+Subject: [PATCH v2 2/3] x86/irq: Use irq_chip_retrigger_hierarchy() in fixup_irqs()
+Message-ID: <20260810090716.2325295-3-namjain@linux.microsoft.com>
+
+fixup_irqs() re-injects a pending interrupt on its new target CPU by
+looking at the outermost domain chip and invoking its irq_retrigger()
+callback directly. That only works when the outermost chip happens to
+install an irq_retrigger() callback, which is not guaranteed for every
+irqchip and could lead to lost interrupts on CPU hot-unplug.
+
+Use irq_chip_retrigger_hierarchy() instead, which walks up the interrupt
+hierarchy until it finds a chip that implements irq_retrigger().
+
+While at it, move the loop-local variables into the loop scope and use a
+scoped guard for desc->lock.
+
+VECTOR_RETRIGGERED is now set only when the retrigger succeeds
+(irq_chip_retrigger_hierarchy() returns non-zero) instead of
+unconditionally. This is harmless today since apic_retrigger_irq()
+always returns 1, and arguably more correct. No functional change
+intended for chips which already provide an irq_retrigger() callback
+on the outermost domain.
+
+Suggested-by: Thomas Gleixner <tglx@kernel.org>
+Reviewed-by: Shradha Gupta <shradhagupta@linux.microsoft.com>
+Signed-off-by: Naman Jain <namjain@linux.microsoft.com>
+---
+ arch/x86/kernel/irq.c | 23 +++++++----------------
+ 1 file changed, 7 insertions(+), 16 deletions(-)
+
+diff --git a/arch/x86/kernel/irq.c b/arch/x86/kernel/irq.c
+index 30122f0b3af96..ef1bdd3c4659a 100644
+--- a/arch/x86/kernel/irq.c
++++ b/arch/x86/kernel/irq.c
+@@ -466,11 +466,6 @@ DEFINE_IDTENTRY_SYSVEC(sysvec_posted_msi_notification)
+ /* A cpu has been removed from cpu_online_mask.  Reset irq affinities. */
+ void fixup_irqs(void)
+ {
+-	unsigned int vector;
+-	struct irq_desc *desc;
+-	struct irq_data *data;
+-	struct irq_chip *chip;
+-
+ 	irq_migrate_all_off_this_cpu();
+ 
+ 	/*
+@@ -489,22 +484,18 @@ void fixup_irqs(void)
+ 	 * vector_lock because the cpu is already marked !online, so
+ 	 * nothing else will touch it.
+ 	 */
+-	for (vector = FIRST_EXTERNAL_VECTOR; vector < NR_VECTORS; vector++) {
+-		if (IS_ERR_OR_NULL(__this_cpu_read(vector_irq[vector])))
++	for (unsigned int vector = FIRST_EXTERNAL_VECTOR; vector < NR_VECTORS; vector++) {
++		struct irq_desc *desc = __this_cpu_read(vector_irq[vector]);
++
++		if (IS_ERR_OR_NULL(desc))
+ 			continue;
+ 
+ 		if (is_vector_pending(vector)) {
+-			desc = __this_cpu_read(vector_irq[vector]);
+-
+-			raw_spin_lock(&desc->lock);
+-			data = irq_desc_get_irq_data(desc);
+-			chip = irq_data_get_irq_chip(data);
+-			if (chip->irq_retrigger) {
+-				chip->irq_retrigger(data);
++			guard(raw_spinlock)(&desc->lock);
++			if (irq_chip_retrigger_hierarchy(&desc->irq_data))
+ 				__this_cpu_write(vector_irq[vector], VECTOR_RETRIGGERED);
+-			}
+-			raw_spin_unlock(&desc->lock);
+ 		}
++
+ 		if (__this_cpu_read(vector_irq[vector]) != VECTOR_RETRIGGERED)
+ 			__this_cpu_write(vector_irq[vector], VECTOR_UNUSED);
+ 	}
+-- 
+2.43.0

@@ -1,0 +1,119 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Naman Jain <namjain@linux.microsoft.com>
+Date: Mon, 10 Aug 2026 09:07:15 +0000
+Subject: [PATCH v2 3/3] x86/irq, iommu/amd, PCI: Drop redundant irq_retrigger inits
+Message-ID: <20260810090716.2325295-4-namjain@linux.microsoft.com>
+
+With fixup_irqs() now using irq_chip_retrigger_hierarchy() and the generic
+resend path (try_retrigger()) already falling back to it, installing
+irq_chip_retrigger_hierarchy() as the irq_retrigger() callback on the
+outermost domain chips is no longer required. The hierarchy walk reaches
+the x86 vector domain's apic_retrigger_irq() for all of these stacked
+domain chips.
+
+Remove the now redundant irq_retrigger() initializations from the outermost
+domain interrupt chips.
+msi_set_affinity() is the only site that invoked the outermost chip's
+irq_retrigger() directly. Convert it to irq_chip_retrigger_hierarchy() so
+the x86_init_dev_msi_info() initialization can be dropped as well.
+
+No functional change intended.
+
+Suggested-by: Thomas Gleixner <tglx@kernel.org>
+Reviewed-by: Shradha Gupta <shradhagupta@linux.microsoft.com>
+Signed-off-by: Naman Jain <namjain@linux.microsoft.com>
+---
+ arch/x86/kernel/apic/io_apic.c      | 2 --
+ arch/x86/kernel/apic/msi.c          | 4 +---
+ arch/x86/kernel/hpet.c              | 1 -
+ drivers/iommu/amd/init.c            | 1 -
+ drivers/pci/controller/pci-hyperv.c | 1 -
+ 5 files changed, 1 insertion(+), 8 deletions(-)
+
+diff --git a/arch/x86/kernel/apic/io_apic.c b/arch/x86/kernel/apic/io_apic.c
+index 7d7175d012288..18f49a251f23b 100644
+--- a/arch/x86/kernel/apic/io_apic.c
++++ b/arch/x86/kernel/apic/io_apic.c
+@@ -1857,7 +1857,6 @@ static struct irq_chip ioapic_chip __read_mostly = {
+ 	.irq_ack		= irq_chip_ack_parent,
+ 	.irq_eoi		= ioapic_ack_level,
+ 	.irq_set_affinity	= ioapic_set_affinity,
+-	.irq_retrigger		= irq_chip_retrigger_hierarchy,
+ 	.irq_get_irqchip_state	= ioapic_irq_get_chip_state,
+ 	.flags			= IRQCHIP_SKIP_SET_WAKE | IRQCHIP_MOVE_DEFERRED |
+ 				  IRQCHIP_AFFINITY_PRE_STARTUP,
+@@ -1871,7 +1870,6 @@ static struct irq_chip ioapic_ir_chip __read_mostly = {
+ 	.irq_ack		= irq_chip_ack_parent,
+ 	.irq_eoi		= ioapic_ir_ack_level,
+ 	.irq_set_affinity	= ioapic_set_affinity,
+-	.irq_retrigger		= irq_chip_retrigger_hierarchy,
+ 	.irq_get_irqchip_state	= ioapic_irq_get_chip_state,
+ 	.flags			= IRQCHIP_SKIP_SET_WAKE |
+ 				  IRQCHIP_AFFINITY_PRE_STARTUP,
+diff --git a/arch/x86/kernel/apic/msi.c b/arch/x86/kernel/apic/msi.c
+index 66bc5d3e79db3..aad2f15eb2176 100644
+--- a/arch/x86/kernel/apic/msi.c
++++ b/arch/x86/kernel/apic/msi.c
+@@ -137,7 +137,7 @@ msi_set_affinity(struct irq_data *irqd, const struct cpumask *mask, bool force)
+ 	 * IRR.
+ 	 */
+ 	if (lapic_vector_set_in_irr(cfg->vector))
+-		irq_data_get_irq_chip(irqd)->irq_retrigger(irqd);
++		irq_chip_retrigger_hierarchy(irqd);
+ 
+ 	return ret;
+ }
+@@ -246,7 +246,6 @@ static bool x86_init_dev_msi_info(struct device *dev, struct irq_domain *domain,
+ 	info->ops->msi_prepare		= x86_msi_prepare;
+ 
+ 	info->chip->irq_ack		= irq_chip_ack_parent;
+-	info->chip->irq_retrigger	= irq_chip_retrigger_hierarchy;
+ 	info->chip->flags		|= IRQCHIP_SKIP_SET_WAKE |
+ 					   IRQCHIP_AFFINITY_PRE_STARTUP;
+ 
+@@ -313,7 +312,6 @@ static struct irq_chip dmar_msi_controller = {
+ 	.irq_mask		= dmar_msi_mask,
+ 	.irq_ack		= irq_chip_ack_parent,
+ 	.irq_set_affinity	= msi_domain_set_affinity,
+-	.irq_retrigger		= irq_chip_retrigger_hierarchy,
+ 	.irq_compose_msi_msg	= dmar_msi_compose_msg,
+ 	.irq_write_msi_msg	= dmar_msi_write_msg,
+ 	.flags			= IRQCHIP_SKIP_SET_WAKE | IRQCHIP_MOVE_DEFERRED |
+diff --git a/arch/x86/kernel/hpet.c b/arch/x86/kernel/hpet.c
+index 8dc7b710e1250..2bb7a6f466af3 100644
+--- a/arch/x86/kernel/hpet.c
++++ b/arch/x86/kernel/hpet.c
+@@ -509,7 +509,6 @@ static struct irq_chip hpet_msi_controller __ro_after_init = {
+ 	.irq_mask = hpet_msi_mask,
+ 	.irq_ack = irq_chip_ack_parent,
+ 	.irq_set_affinity = msi_domain_set_affinity,
+-	.irq_retrigger = irq_chip_retrigger_hierarchy,
+ 	.irq_write_msi_msg = hpet_msi_write_msg,
+ 	.flags = IRQCHIP_SKIP_SET_WAKE | IRQCHIP_AFFINITY_PRE_STARTUP,
+ };
+diff --git a/drivers/iommu/amd/init.c b/drivers/iommu/amd/init.c
+index ea3377e61aa5c..0c362e86a09d9 100644
+--- a/drivers/iommu/amd/init.c
++++ b/drivers/iommu/amd/init.c
+@@ -2468,7 +2468,6 @@ static struct irq_chip intcapxt_controller = {
+ 	.irq_unmask		= intcapxt_unmask_irq,
+ 	.irq_mask		= intcapxt_mask_irq,
+ 	.irq_ack		= irq_chip_ack_parent,
+-	.irq_retrigger		= irq_chip_retrigger_hierarchy,
+ 	.irq_set_affinity       = intcapxt_set_affinity,
+ 	.irq_set_wake		= intcapxt_set_wake,
+ 	.flags			= IRQCHIP_MASK_ON_SUSPEND | IRQCHIP_MOVE_DEFERRED,
+diff --git a/drivers/pci/controller/pci-hyperv.c b/drivers/pci/controller/pci-hyperv.c
+index 89816a2bd7cd3..cfc8fa403dad6 100644
+--- a/drivers/pci/controller/pci-hyperv.c
++++ b/drivers/pci/controller/pci-hyperv.c
+@@ -2119,7 +2119,6 @@ static bool hv_pcie_init_dev_msi_info(struct device *dev, struct irq_domain *dom
+ 	info->ops->msi_prepare = hv_msi_prepare;
+ 
+ 	chip->irq_set_affinity = irq_chip_set_affinity_parent;
+-	chip->irq_retrigger = irq_chip_retrigger_hierarchy;
+ 
+ 	if (IS_ENABLED(CONFIG_X86))
+ 		chip->flags |= IRQCHIP_MOVE_DEFERRED;
+-- 
+2.43.0
